@@ -20,7 +20,7 @@ async def llamaquery(request: Request):
         name="Sharepoint Deal Pipeline",
         project_name="The BEAST",
         organization_id="8ff953cd-9c16-49f2-93a4-732206133586",
-        api_key="llx-YOUR-KEY-HERE",
+        api_key="llx-mERf0jpN1yvhh0zG1YR9QtYpUweo6Tctsci5P6mqbnOAzzsa",
     )
 
     response = index.as_query_engine().query(query)
