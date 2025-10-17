@@ -1,6 +1,8 @@
 from fastapi import FastAPI, Request
 from llama_cloud_services import LlamaCloudIndex
 import uvicorn
+import os
+os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY", "")
 
 app = FastAPI()
 
