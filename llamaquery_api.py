@@ -43,43 +43,31 @@ async def llamaquery(request: Request):
             else:
                 return {"error": f"Llama Cloud connection failed: {str(e)}"}
 
-    # Process results and extract citations
-    results = []
+    # Build plain text output exactly as before
+    text_output = "\n\n".join(
+        [n.text for n in nodes if getattr(n, "text", None)]
+    )
+
+    # Extract file_name and web_url for citations
+    citations = []
+    seen = set()
     for node in nodes:
         node_obj = getattr(node, "node", node)
         metadata = getattr(node_obj, "metadata", {}) or {}
 
-        results.append({
-            "text": getattr(node_obj, "text", "").strip(),
-            "score": getattr(node, "score", None),
-            "file_name": metadata.get("file_name") or metadata.get("filename") or metadata.get("document_title"),
-            "page_label": metadata.get("page_label") or metadata.get("page"),
-            "url": metadata.get("url"),
-        })
+        file_name = metadata.get("file_name") or metadata.get("filename") or metadata.get("document_title")
+        web_url = metadata.get("web_url")  # Use web_url explicitly
 
-    # Create readable text output
-    text_output = "\n\n".join(
-        [f"{r['text']}\n(Source: {r['file_name']}, Page: {r['page_label']}, URL: {r['url']})"
-         for r in results if r['text']]
-    )
-
-    # Deduplicate citations
-    citations = []
-    seen = set()
-    for r in results:
-        key = (r["file_name"], r["page_label"], r["url"])
-        if key not in seen and (r["file_name"] or r["url"]):
+        if (file_name or web_url) and (file_name, web_url) not in seen:
             citations.append({
-                "file_name": r["file_name"],
-                "page_label": r["page_label"],
-                "url": r["url"],
+                "file_name": file_name,
+                "web_url": web_url,
             })
-            seen.add(key)
+            seen.add((file_name, web_url))
 
     return {
         "text": text_output,
-        "citations": citations,
-        "nodes": results
+        "citations": citations
     }
 
 
