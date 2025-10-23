@@ -4,7 +4,6 @@ import httpx
 import asyncio
 import os
 import uvicorn
-import time
 
 os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY", "")
 
@@ -18,23 +17,22 @@ async def llamaquery(request: Request):
     if not query:
         return {"error": "Missing 'query' in request body"}
 
-    # Create a custom HTTPX client with extended timeouts
+    # Custom HTTP client with extended timeouts
     timeout = httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0)
     client = httpx.Client(timeout=timeout)
 
-    # Initialize the index
+    # Initialize the LlamaCloud index
     index = LlamaCloudIndex(
         name="Sharepoint Deal Pipeline",
         project_name="The BEAST",
         organization_id="8ff953cd-9c16-49f2-93a4-732206133586",
         api_key=os.getenv("LLAMA_API_KEY"),
-        client=client,  # pass the custom client if supported
+        client=client,
     )
 
-    # Add retry logic to handle transient drops
+    # Retry logic for transient network issues
     for attempt in range(3):
         try:
-            # Run the retrieval in a background thread since it's sync
             nodes = await asyncio.to_thread(index.as_retriever().retrieve, query)
             break
         except (httpx.RemoteProtocolError, httpx.ReadTimeout) as e:
@@ -45,10 +43,44 @@ async def llamaquery(request: Request):
             else:
                 return {"error": f"Llama Cloud connection failed: {str(e)}"}
 
-    # Concatenate text outputs
-    text_output = "\n\n".join([n.text for n in nodes if getattr(n, "text", None)])
+    # Process results and extract citations
+    results = []
+    for node in nodes:
+        node_obj = getattr(node, "node", node)
+        metadata = getattr(node_obj, "metadata", {}) or {}
 
-    return {"text": text_output}
+        results.append({
+            "text": getattr(node_obj, "text", "").strip(),
+            "score": getattr(node, "score", None),
+            "file_name": metadata.get("file_name") or metadata.get("filename") or metadata.get("document_title"),
+            "page_label": metadata.get("page_label") or metadata.get("page"),
+            "url": metadata.get("url"),
+        })
+
+    # Create readable text output
+    text_output = "\n\n".join(
+        [f"{r['text']}\n(Source: {r['file_name']}, Page: {r['page_label']}, URL: {r['url']})"
+         for r in results if r['text']]
+    )
+
+    # Deduplicate citations
+    citations = []
+    seen = set()
+    for r in results:
+        key = (r["file_name"], r["page_label"], r["url"])
+        if key not in seen and (r["file_name"] or r["url"]):
+            citations.append({
+                "file_name": r["file_name"],
+                "page_label": r["page_label"],
+                "url": r["url"],
+            })
+            seen.add(key)
+
+    return {
+        "text": text_output,
+        "citations": citations,
+        "nodes": results
+    }
 
 
 if __name__ == "__main__":
