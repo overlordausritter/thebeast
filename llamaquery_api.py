@@ -11,43 +11,52 @@ os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY", "")
 app = FastAPI()
 
 
+def normalize_variants(value: str) -> list[str]:
+    """
+    Generate normalized variants for space encodings and case differences.
+    Example: 'Blue Ocean' → ['blue ocean', 'blue%20ocean', 'blue_ocean', 'blueocean']
+    """
+    if not value:
+        return []
+    v = value.strip()
+    lower = v.lower()
+    variants = {lower, lower.replace(" ", "%20"), lower.replace(" ", "_"), lower.replace(" ", "")}
+    return list(variants)
+
+
 @app.post("/llamaquery")
 async def llamaquery(request: Request):
-    """Company-scoped retrieval endpoint using LlamaCloud metadata filters."""
     data = await request.json()
     query = data.get("query")
     if not query:
         return {"error": "Missing 'query' in request body"}
 
-    # Extract the company name from Zapier payload
-    company_name = None
-    try:
-        filters_payload = data.get("filters") or data.get("preFilters")
-        if filters_payload and "filters" in filters_payload:
-            first_filter = filters_payload["filters"][0]
-            company_name = first_filter.get("value")
-    except Exception:
-        company_name = None
+    # Extract the company name from filters sent by Zapier
+    filters_payload = data.get("filters") or data.get("preFilters")
+    company_value = None
+    if filters_payload and "filters" in filters_payload:
+        first = filters_payload["filters"][0]
+        company_value = first.get("value")
 
-    if not company_name:
-        return {"error": "Missing company name in request payload"}
+    if not company_value:
+        return {"error": "Missing 'company name' filter value"}
 
-    # Build LlamaCloud metadata filter using EQ operator (recommended pattern)
-    filters = MetadataFilters(
-        filters=[
-            MetadataFilter(
-                key="company",  # <-- must match the metadata key used during ingestion
-                operator=FilterOperator.EQ,
-                value=company_name,
-            ),
-        ]
-    )
+    # Generate normalized variants for the company name
+    variants = normalize_variants(company_value)
 
-    # Custom HTTP client with extended timeouts
+    # Build metadata filters with OR condition
+    mf_list = []
+    for val in variants:
+        mf_list.extend([
+            MetadataFilter(key="file_name", operator=FilterOperator.CONTAINS, value=val),
+            MetadataFilter(key="web_url", operator=FilterOperator.CONTAINS, value=val),
+        ])
+    filters = MetadataFilters(filters=mf_list, condition="or")
+
+    # Configure client and LlamaCloud index
     timeout = httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0)
     client = httpx.Client(timeout=timeout)
 
-    # Initialize the LlamaCloud index
     index = LlamaCloudIndex(
         name="Sharepoint Deal Pipeline",
         project_name="The BEAST",
@@ -56,17 +65,10 @@ async def llamaquery(request: Request):
         client=client,
     )
 
-    # Retry logic for transient network issues
+    # Retry logic
     for attempt in range(3):
         try:
-            retriever = index.as_retriever(
-                dense_similarity_top_k=3,
-                sparse_similarity_top_k=3,
-                alpha=0.5,
-                enable_reranking=True,
-                rerank_top_n=3,
-                filters=filters,
-            )
+            retriever = index.as_retriever(filters=filters)
             nodes = await asyncio.to_thread(retriever.retrieve, query)
             break
         except (httpx.RemoteProtocolError, httpx.ReadTimeout) as e:
@@ -77,29 +79,18 @@ async def llamaquery(request: Request):
             else:
                 return {"error": f"Llama Cloud connection failed: {str(e)}"}
 
-    # If no nodes were returned, surface a clear message
+    # No post-filter enforcement — rely on retriever filtering only
     if not nodes:
-        return {
-            "text": f"No documents found for company '{company_name}'.",
-            "citations": [],
-        }
+        return {"text": f"No matching documents found for '{company_value}'.", "citations": []}
 
-    # Combine retrieved text
-    text_output = "\n\n".join(
-        [n.text for n in nodes if getattr(n, "text", None)]
-    )
+    text_output = "\n\n".join([n.text for n in nodes if getattr(n, "text", None)])
 
-    # Collect unique citations
     citations = []
     seen = set()
     for node in nodes:
         node_obj = getattr(node, "node", node)
         metadata = getattr(node_obj, "metadata", {}) or {}
-        file_name = (
-            metadata.get("file_name")
-            or metadata.get("filename")
-            or metadata.get("document_title")
-        )
+        file_name = metadata.get("file_name") or metadata.get("filename") or metadata.get("document_title")
         web_url = metadata.get("web_url")
         if (file_name or web_url) and (file_name, web_url) not in seen:
             citations.append({"file_name": file_name, "web_url": web_url})
