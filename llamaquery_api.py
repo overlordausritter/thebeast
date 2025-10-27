@@ -17,7 +17,7 @@ app = FastAPI()
 
 def build_metadata_filters(filters_payload: dict | None) -> MetadataFilters | None:
     """
-    Converts incoming Zapier 'filters' JSON into a LlamaIndex MetadataFilters object.
+    Convert the 'filters' object from JSON into a LlamaIndex MetadataFilters object.
     Also adds %20-encoded variants for values with spaces to match URL encodings.
     """
     if not filters_payload or not isinstance(filters_payload, dict):
@@ -27,11 +27,12 @@ def build_metadata_filters(filters_payload: dict | None) -> MetadataFilters | No
     if not filt_items:
         return None
 
+    # Aligns with your installed llama_index FilterOperator enum
     operator_map = {
         "==": FilterOperator.EQ,
         "eq": FilterOperator.EQ,
         "contains": FilterOperator.CONTAINS,
-        "like": FilterOperator.LIKE,
+        "like": FilterOperator.CONTAINS,  # fallback for versions without LIKE
         "in": FilterOperator.IN,
         "!=": FilterOperator.NE,
     }
@@ -56,6 +57,7 @@ def build_metadata_filters(filters_payload: dict | None) -> MetadataFilters | No
     try:
         return MetadataFilters(filters=mf_list, condition=condition)
     except TypeError:
+        # Older versions without condition parameter
         return MetadataFilters(filters=mf_list)
 
 
@@ -66,14 +68,15 @@ async def llamaquery(request: Request):
     if not query:
         return {"error": "Missing 'query' in request body"}
 
-    # Parse filters if provided by Zapier
+    # Parse metadata filters if provided by Zapier
     filters_payload = data.get("filters") or data.get("preFilters")
     metadata_filters = build_metadata_filters(filters_payload)
 
-    # Create client and index
+    # Custom HTTP client with extended timeouts
     timeout = httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0)
     client = httpx.Client(timeout=timeout)
 
+    # Initialize LlamaCloud index
     index = LlamaCloudIndex(
         name="Sharepoint Deal Pipeline",
         project_name="The BEAST",
@@ -82,7 +85,7 @@ async def llamaquery(request: Request):
         client=client,
     )
 
-    # Retry logic
+    # Retry logic for transient network issues
     for attempt in range(3):
         try:
             retriever = index.as_retriever(filters=metadata_filters)
@@ -108,14 +111,15 @@ async def llamaquery(request: Request):
         node_obj = getattr(node, "node", node)
         metadata = getattr(node_obj, "metadata", {}) or {}
 
-        file_name = metadata.get("file_name") or metadata.get("filename") or metadata.get("document_title")
+        file_name = (
+            metadata.get("file_name")
+            or metadata.get("filename")
+            or metadata.get("document_title")
+        )
         web_url = metadata.get("web_url")
 
         if (file_name or web_url) and (file_name, web_url) not in seen:
-            citations.append({
-                "file_name": file_name,
-                "web_url": web_url,
-            })
+            citations.append({"file_name": file_name, "web_url": web_url})
             seen.add((file_name, web_url))
 
     return {"text": text_output, "citations": citations}
